@@ -1,6 +1,6 @@
 // ============================================================
 // PARTICLE SWARM ENGINE
-// 20000 particles with Spatial Grid + Boids + Sound + Face
+// 20000 particles with Spatial Grid + Boids + Sound
 // ============================================================
 
 const canvas = document.getElementById('canvas');
@@ -43,11 +43,6 @@ const hasTarget = new Uint8Array(PARTICLE_COUNT);
 const hue = new Float32Array(PARTICLE_COUNT);
 const alpha = new Float32Array(PARTICLE_COUNT);
 const size = new Float32Array(PARTICLE_COUNT);
-// Per-particle custom RGB (for image-sampled formations)
-const pR = new Uint8Array(PARTICLE_COUNT);
-const pG = new Uint8Array(PARTICLE_COUNT);
-const pB = new Uint8Array(PARTICLE_COUNT);
-const useCustomColor = new Uint8Array(PARTICLE_COUNT);
 
 // Spatial grid
 const GRID_SIZE = 40;
@@ -115,37 +110,29 @@ function createSound(mode) {
       nodes.push(osc1, osc2, lfo);
       break;
     }
-    case 'face': {
-      // Voice-like formant synthesis
-      const fundamental = audioCtx.createOscillator();
-      fundamental.type = 'sawtooth';
-      fundamental.frequency.value = 130; // Low voice
-      // Formant filters (vowel-like)
-      const f1 = audioCtx.createBiquadFilter();
-      f1.type = 'bandpass'; f1.frequency.value = 600; f1.Q.value = 8;
-      const f2 = audioCtx.createBiquadFilter();
-      f2.type = 'bandpass'; f2.frequency.value = 1200; f2.Q.value = 8;
-      const f3 = audioCtx.createBiquadFilter();
-      f3.type = 'bandpass'; f3.frequency.value = 2500; f3.Q.value = 6;
-      const fGain1 = audioCtx.createGain(); fGain1.gain.value = 0.5;
-      const fGain2 = audioCtx.createGain(); fGain2.gain.value = 0.3;
-      const fGain3 = audioCtx.createGain(); fGain3.gain.value = 0.15;
-      fundamental.connect(f1); f1.connect(fGain1); fGain1.connect(masterGain);
-      fundamental.connect(f2); f2.connect(fGain2); fGain2.connect(masterGain);
-      fundamental.connect(f3); f3.connect(fGain3); fGain3.connect(masterGain);
-      // Animate formants for speech-like quality
-      const lfo1 = audioCtx.createOscillator(); lfo1.frequency.value = 0.8;
-      const lfo1g = audioCtx.createGain(); lfo1g.gain.value = 200;
-      lfo1.connect(lfo1g); lfo1g.connect(f1.frequency);
-      const lfo2 = audioCtx.createOscillator(); lfo2.frequency.value = 1.2;
-      const lfo2g = audioCtx.createGain(); lfo2g.gain.value = 300;
-      lfo2.connect(lfo2g); lfo2g.connect(f2.frequency);
-      // Amplitude modulation for syllable rhythm
-      const ampLfo = audioCtx.createOscillator(); ampLfo.frequency.value = 2.5;
-      const ampLfoG = audioCtx.createGain(); ampLfoG.gain.value = 0.08;
-      ampLfo.connect(ampLfoG); ampLfoG.connect(masterGain.gain);
-      fundamental.start(); lfo1.start(); lfo2.start(); ampLfo.start();
-      nodes.push(fundamental, lfo1, lfo2, ampLfo);
+    case 'galaxy': {
+      // Deep space ambient — low drone + shimmer
+      const osc1 = audioCtx.createOscillator(); osc1.type = 'sine'; osc1.frequency.value = 55;
+      const osc2 = audioCtx.createOscillator(); osc2.type = 'sine'; osc2.frequency.value = 82.5;
+      const osc3 = audioCtx.createOscillator(); osc3.type = 'triangle'; osc3.frequency.value = 220;
+      const g1 = audioCtx.createGain(); g1.gain.value = 0.4;
+      const g2 = audioCtx.createGain(); g2.gain.value = 0.25;
+      const g3 = audioCtx.createGain(); g3.gain.value = 0.08;
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'lowpass'; filter.frequency.value = 400; filter.Q.value = 3;
+      const lfo = audioCtx.createOscillator(); lfo.frequency.value = 0.08;
+      const lfoG = audioCtx.createGain(); lfoG.gain.value = 150;
+      lfo.connect(lfoG); lfoG.connect(filter.frequency);
+      // Shimmer LFO on high tone
+      const lfo2 = audioCtx.createOscillator(); lfo2.frequency.value = 0.3;
+      const lfo2G = audioCtx.createGain(); lfo2G.gain.value = 0.06;
+      lfo2.connect(lfo2G); lfo2G.connect(g3.gain);
+      osc1.connect(g1); g1.connect(filter);
+      osc2.connect(g2); g2.connect(filter);
+      osc3.connect(g3); g3.connect(masterGain);
+      filter.connect(masterGain);
+      osc1.start(); osc2.start(); osc3.start(); lfo.start(); lfo2.start();
+      nodes.push(osc1, osc2, osc3, lfo, lfo2);
       break;
     }
     case 'text': {
@@ -355,8 +342,8 @@ function updateParticles() {
     if (hasTarget[i]) {
       const dx = tx[i] - px[i];
       const dy = ty[i] - py[i];
-      const ms = useCustomColor[i] ? 0.15 : MORPH_SPEED;
-      const damp = useCustomColor[i] ? 0.82 : 0.92;
+      const ms = MORPH_SPEED;
+      const damp = 0.92;
       vx[i] = (vx[i] + dx * ms) * damp;
       vy[i] = (vy[i] + dy * ms) * damp;
     } else {
@@ -430,25 +417,7 @@ function drawParticles() {
 
     let rr, gg, bb, srcA;
 
-    if (useCustomColor[i]) {
-      // Image-sampled color — use direct placement
-      rr = pR[i]; gg = pG[i]; bb = pB[i];
-      const ps = Math.max(1, Math.round(size[i]));
-      const a2 = alpha[i];
-      const invA = 1 - a2;
-      for (let dy = 0; dy < ps; dy++) {
-        for (let dx = 0; dx < ps; dx++) {
-          const fx = ix + dx, fy = iy + dy;
-          if (fx < 0 || fx >= width || fy < 0 || fy >= height) continue;
-          const idx = (fy * width + fx) * 4;
-          data[idx]     = (rr * a2 + data[idx] * invA) | 0;
-          data[idx + 1] = (gg * a2 + data[idx + 1] * invA) | 0;
-          data[idx + 2] = (bb * a2 + data[idx + 2] * invA) | 0;
-          data[idx + 3] = 255;
-        }
-      }
-      continue;
-    } else {
+    {
       // HSL dynamic color
       const speed = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
       const h = (hue[i] + speed * 15 + time * 0.2) % 360;
@@ -488,321 +457,46 @@ function drawParticles() {
 // ============================================================
 // FORMATIONS
 // ============================================================
-function clearCustomColors() {
-  for (let i = 0; i < PARTICLE_COUNT; i++) useCustomColor[i] = 0;
-}
-
 const formations = {
   swarm() {
-    clearCustomColors();
     for (let i = 0; i < PARTICLE_COUNT; i++) hasTarget[i] = 0;
   },
 
-  face() {
-    // Render a realistic face on offscreen canvas, then sample pixels
-    // Small canvas, then scale up — particles fill every pixel of the face
-    const renderScale = 0.18;
-    const faceW = Math.floor(Math.min(width, height) * renderScale);
-    const faceH = Math.floor(faceW * 1.35);
-    const displayScale = Math.min(width, height) * 0.55 / faceW;
-    const fcx = Math.floor(faceW / 2);
-    const fcy = Math.floor(faceH / 2);
+  galaxy() {
+    // Multi-arm spiral galaxy
+    const points = [];
+    const radius = Math.min(width, height) * 0.35;
+    const arms = 5;
+    const armParticles = Math.floor(PARTICLE_COUNT * 0.7);
+    const coreParticles = PARTICLE_COUNT - armParticles;
 
-    const oc = document.createElement('canvas');
-    oc.width = Math.floor(faceW);
-    oc.height = Math.floor(faceH);
-    const g = oc.getContext('2d');
-
-    // Animation
-    const speechCycle = time * 0.12;
-    const mouthOpen = Math.max(0, Math.sin(speechCycle) * 0.5 + Math.sin(speechCycle * 2.7) * 0.25) * faceW * 0.04;
-    const blinkRaw = Math.sin(time * 0.035);
-    const blink = blinkRaw > 0.96 ? Math.max(0.05, 1 - (blinkRaw - 0.96) / 0.04) : 1.0;
-
-    const s = faceW;
-
-    // --- Skin base (head shape) ---
-    g.save();
-    g.beginPath();
-    g.ellipse(fcx, fcy, s * 0.38, s * 0.48, 0, 0, Math.PI * 2);
-    g.closePath();
-    g.clip();
-
-    // Skin gradient (3D lighting)
-    const skinGrad = g.createRadialGradient(fcx - s * 0.05, fcy - s * 0.15, s * 0.05, fcx, fcy, s * 0.5);
-    skinGrad.addColorStop(0, '#f5d0a9');
-    skinGrad.addColorStop(0.3, '#e8b88a');
-    skinGrad.addColorStop(0.6, '#d4a074');
-    skinGrad.addColorStop(0.85, '#c08860');
-    skinGrad.addColorStop(1, '#8a6040');
-    g.fillStyle = skinGrad;
-    g.fillRect(0, 0, oc.width, oc.height);
-
-    // Forehead highlight
-    const fhGrad = g.createRadialGradient(fcx, fcy - s * 0.25, 0, fcx, fcy - s * 0.25, s * 0.2);
-    fhGrad.addColorStop(0, 'rgba(255,230,200,0.4)');
-    fhGrad.addColorStop(1, 'rgba(255,230,200,0)');
-    g.fillStyle = fhGrad;
-    g.fillRect(0, 0, oc.width, oc.height);
-
-    // Cheek blush
-    [[-1, 0.08], [1, 0.08]].forEach(([side, cy2]) => {
-      const blush = g.createRadialGradient(fcx + side * s * 0.2, fcy + s * cy2, 0, fcx + side * s * 0.2, fcy + s * cy2, s * 0.1);
-      blush.addColorStop(0, 'rgba(220,140,120,0.25)');
-      blush.addColorStop(1, 'rgba(220,140,120,0)');
-      g.fillStyle = blush;
-      g.fillRect(0, 0, oc.width, oc.height);
-    });
-
-    // Nose shadow
-    const noseShade = g.createLinearGradient(fcx - s * 0.03, fcy - s * 0.05, fcx + s * 0.03, fcy + s * 0.12);
-    noseShade.addColorStop(0, 'rgba(160,100,60,0.15)');
-    noseShade.addColorStop(0.5, 'rgba(160,100,60,0.05)');
-    noseShade.addColorStop(1, 'rgba(160,100,60,0.2)');
-    g.fillStyle = noseShade;
-    g.beginPath();
-    g.moveTo(fcx - s * 0.02, fcy - s * 0.06);
-    g.quadraticCurveTo(fcx - s * 0.035, fcy + s * 0.08, fcx - s * 0.04, fcy + s * 0.12);
-    g.quadraticCurveTo(fcx, fcy + s * 0.15, fcx + s * 0.04, fcy + s * 0.12);
-    g.quadraticCurveTo(fcx + s * 0.035, fcy + s * 0.08, fcx + s * 0.02, fcy - s * 0.06);
-    g.fill();
-
-    // Nose highlight
-    const noseHL = g.createLinearGradient(fcx, fcy - s * 0.04, fcx, fcy + s * 0.1);
-    noseHL.addColorStop(0, 'rgba(255,235,210,0.4)');
-    noseHL.addColorStop(1, 'rgba(255,235,210,0)');
-    g.fillStyle = noseHL;
-    g.beginPath();
-    g.ellipse(fcx + s * 0.003, fcy + s * 0.02, s * 0.012, s * 0.08, 0, 0, Math.PI * 2);
-    g.fill();
-
-    // Nostril shadows (much darker)
-    [[-1], [1]].forEach(([side]) => {
-      g.fillStyle = 'rgba(40,15,5,0.7)';
-      g.beginPath();
-      g.ellipse(fcx + side * s * 0.03, fcy + s * 0.13, s * 0.02, s * 0.012, side * 0.3, 0, Math.PI * 2);
-      g.fill();
-    });
-
-    // --- Eye sockets (deep shadows) ---
-    [[-1], [1]].forEach(([side]) => {
-      const ex = fcx + side * s * 0.14;
-      const ey = fcy - s * 0.06;
-      const socketGrad = g.createRadialGradient(ex, ey, s * 0.01, ex, ey, s * 0.1);
-      socketGrad.addColorStop(0, 'rgba(60,30,15,0.5)');
-      socketGrad.addColorStop(0.6, 'rgba(90,50,30,0.3)');
-      socketGrad.addColorStop(1, 'rgba(120,70,40,0)');
-      g.fillStyle = socketGrad;
-      g.fillRect(ex - s * 0.12, ey - s * 0.08, s * 0.24, s * 0.16);
-    });
-
-    // --- Eyes (much larger for visibility at particle scale) ---
-    [[-1], [1]].forEach(([side]) => {
-      const ex = fcx + side * s * 0.14;
-      const ey = fcy - s * 0.06;
-      const eyeRx = s * 0.075;
-      const eyeRy = s * 0.035 * blink;
-
-      // Eye white
-      g.fillStyle = '#eae6e0';
-      g.beginPath();
-      g.ellipse(ex, ey, eyeRx, eyeRy, 0, 0, Math.PI * 2);
-      g.fill();
-
-      // Eye white shadow (top, stronger)
-      const ewGrad = g.createLinearGradient(ex, ey - eyeRy, ex, ey + eyeRy * 0.3);
-      ewGrad.addColorStop(0, 'rgba(60,30,15,0.45)');
-      ewGrad.addColorStop(0.5, 'rgba(80,50,30,0.15)');
-      ewGrad.addColorStop(1, 'rgba(100,60,40,0)');
-      g.fillStyle = ewGrad;
-      g.beginPath();
-      g.ellipse(ex, ey, eyeRx, eyeRy, 0, 0, Math.PI * 2);
-      g.fill();
-
-      if (blink > 0.2) {
-        // Iris (larger, bolder)
-        const irisR = s * 0.032;
-        const irisGrad = g.createRadialGradient(ex, ey, irisR * 0.1, ex, ey, irisR);
-        irisGrad.addColorStop(0, '#1a3a1a');
-        irisGrad.addColorStop(0.3, '#2a5a2a');
-        irisGrad.addColorStop(0.6, '#3d7a3d');
-        irisGrad.addColorStop(0.85, '#2a4a20');
-        irisGrad.addColorStop(1, '#1a3018');
-        g.fillStyle = irisGrad;
-        g.beginPath();
-        g.arc(ex, ey, irisR, 0, Math.PI * 2);
-        g.fill();
-
-        // Pupil (larger)
-        g.fillStyle = '#050505';
-        g.beginPath();
-        g.arc(ex, ey, s * 0.015, 0, Math.PI * 2);
-        g.fill();
-
-        // Catchlight (bigger)
-        g.fillStyle = 'rgba(255,255,255,0.95)';
-        g.beginPath();
-        g.arc(ex + s * 0.01, ey - s * 0.01, s * 0.007, 0, Math.PI * 2);
-        g.fill();
-        g.fillStyle = 'rgba(255,255,255,0.5)';
-        g.beginPath();
-        g.arc(ex - s * 0.006, ey + s * 0.006, s * 0.004, 0, Math.PI * 2);
-        g.fill();
-      }
-
-      // Eyelid crease (stronger)
-      g.strokeStyle = 'rgba(80,40,20,0.6)';
-      g.lineWidth = 2;
-      g.beginPath();
-      g.ellipse(ex, ey - eyeRy * 0.2, eyeRx * 1.08, eyeRy * 1.5, 0, Math.PI + 0.25, Math.PI * 2 - 0.25);
-      g.stroke();
-
-      // Eyelashes (upper, bolder)
-      g.strokeStyle = 'rgba(20,10,5,0.85)';
-      g.lineWidth = 2.5;
-      g.beginPath();
-      g.ellipse(ex, ey, eyeRx, eyeRy, 0, Math.PI + 0.1, Math.PI * 2 - 0.1);
-      g.stroke();
-
-      // Lower lash line
-      g.strokeStyle = 'rgba(40,20,10,0.4)';
-      g.lineWidth = 1;
-      g.beginPath();
-      g.ellipse(ex, ey, eyeRx * 0.95, eyeRy * 0.9, 0, 0.15, Math.PI - 0.15);
-      g.stroke();
-    });
-
-    // --- Eyebrows (much thicker, bolder) ---
-    [[-1], [1]].forEach(([side]) => {
-      const bx = fcx + side * s * 0.14;
-      const by = fcy - s * 0.13;
-      // Thick main stroke
-      g.strokeStyle = 'rgba(35,18,8,0.9)';
-      g.lineWidth = s * 0.02;
-      g.lineCap = 'round';
-      g.beginPath();
-      g.moveTo(bx - side * s * 0.065, by + s * 0.012);
-      g.quadraticCurveTo(bx, by - s * 0.018, bx + side * s * 0.065, by + s * 0.008);
-      g.stroke();
-      // Fill for density
-      g.fillStyle = 'rgba(35,18,8,0.7)';
-      g.beginPath();
-      g.moveTo(bx - side * s * 0.065, by + s * 0.012);
-      g.quadraticCurveTo(bx, by - s * 0.025, bx + side * s * 0.065, by + s * 0.008);
-      g.quadraticCurveTo(bx, by + s * 0.008, bx - side * s * 0.065, by + s * 0.012);
-      g.fill();
-    });
-
-    // --- Mouth ---
-    const my = fcy + s * 0.22;
-    const mw = s * 0.1;
-    const mh = s * 0.015 + mouthOpen;
-
-    // Mouth interior (dark, always slightly visible)
-    g.fillStyle = mouthOpen > 1.5 ? '#1a0505' : 'rgba(100,40,30,0.6)';
-    g.beginPath();
-    g.ellipse(fcx, my, mw * 0.9, Math.max(mh * 0.5, s * 0.008), 0, 0, Math.PI * 2);
-    g.fill();
-
-    // Teeth
-    if (mouthOpen > 3) {
-      g.fillStyle = '#e8e4dc';
-      const tw = mw * 0.6;
-      const th = Math.min(mh * 0.22, s * 0.02);
-      g.beginPath();
-      g.roundRect(fcx - tw, my - mh * 0.3, tw * 2, th, 2);
-      g.fill();
+    // Spiral arms
+    for (let i = 0; i < armParticles; i++) {
+      const arm = i % arms;
+      const t = (i / armParticles) * 3.5; // how far along the arm
+      const armAngle = (arm / arms) * Math.PI * 2;
+      const spiralAngle = armAngle + t * 1.8 + time * 0.003;
+      const r = t * radius * 0.28;
+      // Spread perpendicular to arm
+      const spread = (Math.random() - 0.5) * r * 0.25;
+      const spreadAngle = spiralAngle + Math.PI / 2;
+      points.push(
+        centerX + Math.cos(spiralAngle) * r + Math.cos(spreadAngle) * spread,
+        centerY + Math.sin(spiralAngle) * r * 0.55 + Math.sin(spreadAngle) * spread * 0.55 // flatten for tilt
+      );
     }
 
-    // Upper lip (bolder, darker)
-    g.fillStyle = '#a04535';
-    g.beginPath();
-    g.moveTo(fcx - mw, my - mh * 0.15);
-    g.quadraticCurveTo(fcx - mw * 0.5, my - mh * 0.65, fcx, my - mh * 0.35);
-    g.quadraticCurveTo(fcx + mw * 0.5, my - mh * 0.65, fcx + mw, my - mh * 0.15);
-    g.quadraticCurveTo(fcx, my + mh * 0.1, fcx - mw, my - mh * 0.15);
-    g.fill();
-
-    // Lower lip (fuller, stronger color)
-    g.fillStyle = '#b85550';
-    g.beginPath();
-    g.moveTo(fcx - mw * 0.9, my + mh * 0.08);
-    g.quadraticCurveTo(fcx, my + mh * 0.75, fcx + mw * 0.9, my + mh * 0.08);
-    g.quadraticCurveTo(fcx, my + mh * 0.2, fcx - mw * 0.9, my + mh * 0.08);
-    g.fill();
-
-    // Lip line (dark seam)
-    g.strokeStyle = 'rgba(60,20,15,0.7)';
-    g.lineWidth = 1.5;
-    g.beginPath();
-    g.moveTo(fcx - mw, my);
-    g.quadraticCurveTo(fcx, my - mh * 0.05, fcx + mw, my);
-    g.stroke();
-
-    // Nasolabial folds (stronger)
-    [[-1], [1]].forEach(([side]) => {
-      g.strokeStyle = 'rgba(100,55,30,0.35)';
-      g.lineWidth = 2.5;
-      g.beginPath();
-      g.moveTo(fcx + side * s * 0.06, fcy + s * 0.04);
-      g.quadraticCurveTo(fcx + side * s * 0.11, fcy + s * 0.14, fcx + side * s * 0.1, my - s * 0.01);
-      g.stroke();
-    });
-
-    // Chin shadow
-    const chinGrad = g.createRadialGradient(fcx, fcy + s * 0.35, 0, fcx, fcy + s * 0.35, s * 0.1);
-    chinGrad.addColorStop(0, 'rgba(140,90,60,0.15)');
-    chinGrad.addColorStop(1, 'rgba(140,90,60,0)');
-    g.fillStyle = chinGrad;
-    g.fillRect(fcx - s * 0.15, fcy + s * 0.28, s * 0.3, s * 0.15);
-
-    g.restore();
-
-    // --- Sample ALL pixels from rendered face ---
-    const imgData = g.getImageData(0, 0, oc.width, oc.height);
-    const pixels = imgData.data;
-    const samplePoints = [];
-
-    // Sample every pixel (canvas is small enough)
-    for (let y = 0; y < oc.height; y++) {
-      for (let x = 0; x < oc.width; x++) {
-        const idx = (y * oc.width + x) * 4;
-        const r = pixels[idx], gr = pixels[idx + 1], b = pixels[idx + 2], a = pixels[idx + 3];
-        if (a > 20 && (r > 15 || gr > 15 || b > 15)) {
-          samplePoints.push(x, y, r, gr, b);
-        }
-      }
+    // Dense core
+    for (let i = 0; i < coreParticles; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.pow(Math.random(), 2) * radius * 0.12;
+      points.push(
+        centerX + Math.cos(angle) * r,
+        centerY + Math.sin(angle) * r * 0.55
+      );
     }
 
-    // Shuffle
-    const numPts = samplePoints.length / 5;
-    for (let i = numPts - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      for (let k = 0; k < 5; k++) {
-        const tmp = samplePoints[i * 5 + k];
-        samplePoints[i * 5 + k] = samplePoints[j * 5 + k];
-        samplePoints[j * 5 + k] = tmp;
-      }
-    }
-
-    // Scale up and center on screen
-    const displayW = faceW * displayScale;
-    const displayH = faceH * displayScale;
-    const offX = centerX - displayW / 2;
-    const offY = centerY - displayH / 2;
-
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const si = (i % numPts) * 5;
-      tx[i] = samplePoints[si] * displayScale + offX + (Math.random() - 0.5) * 0.5;
-      ty[i] = samplePoints[si + 1] * displayScale + offY + (Math.random() - 0.5) * 0.5;
-      pR[i] = samplePoints[si + 2];
-      pG[i] = samplePoints[si + 3];
-      pB[i] = samplePoints[si + 4];
-      useCustomColor[i] = 1;
-      hasTarget[i] = 1;
-      size[i] = displayScale * 0.7; // bigger particles to fill gaps
-      alpha[i] = 0.85;
-    }
+    assignTargetsFlat(points);
   },
 
   text() {
@@ -1015,14 +709,10 @@ function animate(timestamp) {
     lastTime = timestamp;
   }
   time++;
-  if (currentMode === 'face') {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
-  } else {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
-  }
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
   ctx.fillRect(0, 0, width, height);
   if (currentMode === 'swarm') buildGrid();
-  if (currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral') {
+  if (currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral' || currentMode === 'galaxy') {
     formations[currentMode]();
   }
   updateParticles();
@@ -1046,7 +736,7 @@ document.querySelectorAll('.controls button').forEach(btn => {
 });
 
 document.addEventListener('keydown', (e) => {
-  const keys = { '1': 'swarm', '2': 'face', '3': 'text', '4': 'wave', '5': 'chart', '6': 'sphere', '7': 'dna', '8': 'heart', '9': 'spiral' };
+  const keys = { '1': 'swarm', '2': 'galaxy', '3': 'text', '4': 'wave', '5': 'chart', '6': 'sphere', '7': 'dna', '8': 'heart', '9': 'spiral' };
   if (keys[e.key]) switchMode(keys[e.key]);
 });
 
@@ -1071,14 +761,6 @@ soundToggleBtn.addEventListener('click', () => {
 
 // Override switchMode to not auto-start sound unless toggle is on
 function switchMode(mode) {
-  if (mode !== 'face') {
-    clearCustomColors();
-    // Reset particle sizes
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      size[i] = PARTICLE_SIZE * (0.6 + Math.random() * 0.5);
-      alpha[i] = 0.6 + Math.random() * 0.4;
-    }
-  }
   currentMode = mode;
   formations[currentMode]();
   if (soundStarted) createSound(mode);
