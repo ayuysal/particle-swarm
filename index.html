@@ -91,11 +91,41 @@
       color: rgba(255, 255, 255, 0.3);
       font-variant-numeric: tabular-nums;
     }
+
+    .sound-toggle {
+      position: fixed;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      padding: 6px 16px;
+      background: rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      font-family: inherit;
+      letter-spacing: 0.5px;
+    }
+
+    .sound-toggle:hover {
+      background: rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .sound-toggle.on {
+      color: rgba(79, 70, 229, 0.9);
+      border-color: rgba(79, 70, 229, 0.4);
+    }
   </style>
 </head>
 <body>
   <div class="info">PARTICLE SWARM <span>— 20,000 Particles</span></div>
   <div class="fps" id="fps">0 FPS</div>
+  <button class="sound-toggle" id="soundToggle">SOUND OFF</button>
   <canvas id="canvas"></canvas>
 
   <div class="controls">
