@@ -43,6 +43,11 @@ const hasTarget = new Uint8Array(PARTICLE_COUNT);
 const hue = new Float32Array(PARTICLE_COUNT);
 const alpha = new Float32Array(PARTICLE_COUNT);
 const size = new Float32Array(PARTICLE_COUNT);
+// Per-particle custom RGB (for image-sampled formations)
+const pR = new Uint8Array(PARTICLE_COUNT);
+const pG = new Uint8Array(PARTICLE_COUNT);
+const pB = new Uint8Array(PARTICLE_COUNT);
+const useCustomColor = new Uint8Array(PARTICLE_COUNT);
 
 // Spatial grid
 const GRID_SIZE = 40;
@@ -350,8 +355,10 @@ function updateParticles() {
     if (hasTarget[i]) {
       const dx = tx[i] - px[i];
       const dy = ty[i] - py[i];
-      vx[i] = (vx[i] + dx * MORPH_SPEED) * 0.92;
-      vy[i] = (vy[i] + dy * MORPH_SPEED) * 0.92;
+      const ms = useCustomColor[i] ? 0.15 : MORPH_SPEED;
+      const damp = useCustomColor[i] ? 0.82 : 0.92;
+      vx[i] = (vx[i] + dx * ms) * damp;
+      vy[i] = (vy[i] + dy * ms) * damp;
     } else {
       let sepX = 0, sepY = 0, sepCount = 0;
       let alignX = 0, alignY = 0, cohX = 0, cohY = 0, neighborCount = 0;
@@ -420,24 +427,48 @@ function drawParticles() {
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const ix = px[i] | 0, iy = py[i] | 0;
     if (ix < 0 || ix >= width || iy < 0 || iy >= height) continue;
-    const speed = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
-    const h = (hue[i] + speed * 15 + time * 0.2) % 360;
-    const l = Math.min(80, 50 + speed * 12);
-    const a = alpha[i];
-    const c = (1 - Math.abs(2 * l / 100 - 1)) * 0.8;
-    const x2 = c * (1 - Math.abs(((h / 60) % 2) - 1));
-    const m = l / 100 - c / 2;
-    let r, g, b;
-    if (h < 60) { r = c; g = x2; b = 0; }
-    else if (h < 120) { r = x2; g = c; b = 0; }
-    else if (h < 180) { r = 0; g = c; b = x2; }
-    else if (h < 240) { r = 0; g = x2; b = c; }
-    else if (h < 300) { r = c; g = 0; b = x2; }
-    else { r = x2; g = 0; b = c; }
-    const rr = ((r + m) * 255) | 0;
-    const gg = ((g + m) * 255) | 0;
-    const bb = ((b + m) * 255) | 0;
-    const srcA = a;
+
+    let rr, gg, bb, srcA;
+
+    if (useCustomColor[i]) {
+      // Image-sampled color — use direct placement
+      rr = pR[i]; gg = pG[i]; bb = pB[i];
+      const ps = Math.max(1, Math.round(size[i]));
+      const a2 = alpha[i];
+      const invA = 1 - a2;
+      for (let dy = 0; dy < ps; dy++) {
+        for (let dx = 0; dx < ps; dx++) {
+          const fx = ix + dx, fy = iy + dy;
+          if (fx < 0 || fx >= width || fy < 0 || fy >= height) continue;
+          const idx = (fy * width + fx) * 4;
+          data[idx]     = (rr * a2 + data[idx] * invA) | 0;
+          data[idx + 1] = (gg * a2 + data[idx + 1] * invA) | 0;
+          data[idx + 2] = (bb * a2 + data[idx + 2] * invA) | 0;
+          data[idx + 3] = 255;
+        }
+      }
+      continue;
+    } else {
+      // HSL dynamic color
+      const speed = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
+      const h = (hue[i] + speed * 15 + time * 0.2) % 360;
+      const l = Math.min(80, 50 + speed * 12);
+      srcA = alpha[i];
+      const c = (1 - Math.abs(2 * l / 100 - 1)) * 0.8;
+      const x2 = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = l / 100 - c / 2;
+      let r, g, b;
+      if (h < 60) { r = c; g = x2; b = 0; }
+      else if (h < 120) { r = x2; g = c; b = 0; }
+      else if (h < 180) { r = 0; g = c; b = x2; }
+      else if (h < 240) { r = 0; g = x2; b = c; }
+      else if (h < 300) { r = c; g = 0; b = x2; }
+      else { r = x2; g = 0; b = c; }
+      rr = ((r + m) * 255) | 0;
+      gg = ((g + m) * 255) | 0;
+      bb = ((b + m) * 255) | 0;
+    }
+
     const s = size[i] > 1 ? 2 : 1;
     for (let dy = 0; dy < s; dy++) {
       for (let dx = 0; dx < s; dx++) {
@@ -457,291 +488,321 @@ function drawParticles() {
 // ============================================================
 // FORMATIONS
 // ============================================================
+function clearCustomColors() {
+  for (let i = 0; i < PARTICLE_COUNT; i++) useCustomColor[i] = 0;
+}
+
 const formations = {
   swarm() {
+    clearCustomColors();
     for (let i = 0; i < PARTICLE_COUNT; i++) hasTarget[i] = 0;
   },
 
   face() {
-    const points = [];
-    const s = Math.min(width, height) * 0.4;
-    const cx = centerX;
-    const cy = centerY - s * 0.02;
+    // Render a realistic face on offscreen canvas, then sample pixels
+    // Small canvas, then scale up — particles fill every pixel of the face
+    const renderScale = 0.18;
+    const faceW = Math.floor(Math.min(width, height) * renderScale);
+    const faceH = Math.floor(faceW * 1.35);
+    const displayScale = Math.min(width, height) * 0.55 / faceW;
+    const fcx = Math.floor(faceW / 2);
+    const fcy = Math.floor(faceH / 2);
 
-    // Animation drivers
+    const oc = document.createElement('canvas');
+    oc.width = Math.floor(faceW);
+    oc.height = Math.floor(faceH);
+    const g = oc.getContext('2d');
+
+    // Animation
     const speechCycle = time * 0.12;
-    const mouthOpen = Math.max(0, Math.sin(speechCycle) * 0.5 + Math.sin(speechCycle * 2.7) * 0.25 + Math.sin(speechCycle * 0.3) * 0.2);
-    const browRaise = Math.sin(speechCycle * 0.7) * 0.04 + Math.sin(speechCycle * 1.3) * 0.02;
+    const mouthOpen = Math.max(0, Math.sin(speechCycle) * 0.5 + Math.sin(speechCycle * 2.7) * 0.25) * faceW * 0.04;
     const blinkRaw = Math.sin(time * 0.035);
-    const blink = blinkRaw > 0.96 ? (1 - (blinkRaw - 0.96) / 0.04) : 1.0;
-    const headTilt = Math.sin(time * 0.008) * 0.02;
+    const blink = blinkRaw > 0.96 ? Math.max(0.05, 1 - (blinkRaw - 0.96) / 0.04) : 1.0;
 
-    // Helper: rotate point around center
-    function rot(x, y) {
-      const dx = x - cx, dy = y - cy;
-      return [cx + dx * Math.cos(headTilt) - dy * Math.sin(headTilt),
-              cy + dx * Math.sin(headTilt) + dy * Math.cos(headTilt)];
+    const s = faceW;
+
+    // --- Skin base (head shape) ---
+    g.save();
+    g.beginPath();
+    g.ellipse(fcx, fcy, s * 0.38, s * 0.48, 0, 0, Math.PI * 2);
+    g.closePath();
+    g.clip();
+
+    // Skin gradient (3D lighting)
+    const skinGrad = g.createRadialGradient(fcx - s * 0.05, fcy - s * 0.15, s * 0.05, fcx, fcy, s * 0.5);
+    skinGrad.addColorStop(0, '#f5d0a9');
+    skinGrad.addColorStop(0.3, '#e8b88a');
+    skinGrad.addColorStop(0.6, '#d4a074');
+    skinGrad.addColorStop(0.85, '#c08860');
+    skinGrad.addColorStop(1, '#8a6040');
+    g.fillStyle = skinGrad;
+    g.fillRect(0, 0, oc.width, oc.height);
+
+    // Forehead highlight
+    const fhGrad = g.createRadialGradient(fcx, fcy - s * 0.25, 0, fcx, fcy - s * 0.25, s * 0.2);
+    fhGrad.addColorStop(0, 'rgba(255,230,200,0.4)');
+    fhGrad.addColorStop(1, 'rgba(255,230,200,0)');
+    g.fillStyle = fhGrad;
+    g.fillRect(0, 0, oc.width, oc.height);
+
+    // Cheek blush
+    [[-1, 0.08], [1, 0.08]].forEach(([side, cy2]) => {
+      const blush = g.createRadialGradient(fcx + side * s * 0.2, fcy + s * cy2, 0, fcx + side * s * 0.2, fcy + s * cy2, s * 0.1);
+      blush.addColorStop(0, 'rgba(220,140,120,0.25)');
+      blush.addColorStop(1, 'rgba(220,140,120,0)');
+      g.fillStyle = blush;
+      g.fillRect(0, 0, oc.width, oc.height);
+    });
+
+    // Nose shadow
+    const noseShade = g.createLinearGradient(fcx - s * 0.03, fcy - s * 0.05, fcx + s * 0.03, fcy + s * 0.12);
+    noseShade.addColorStop(0, 'rgba(160,100,60,0.15)');
+    noseShade.addColorStop(0.5, 'rgba(160,100,60,0.05)');
+    noseShade.addColorStop(1, 'rgba(160,100,60,0.2)');
+    g.fillStyle = noseShade;
+    g.beginPath();
+    g.moveTo(fcx - s * 0.02, fcy - s * 0.06);
+    g.quadraticCurveTo(fcx - s * 0.035, fcy + s * 0.08, fcx - s * 0.04, fcy + s * 0.12);
+    g.quadraticCurveTo(fcx, fcy + s * 0.15, fcx + s * 0.04, fcy + s * 0.12);
+    g.quadraticCurveTo(fcx + s * 0.035, fcy + s * 0.08, fcx + s * 0.02, fcy - s * 0.06);
+    g.fill();
+
+    // Nose highlight
+    const noseHL = g.createLinearGradient(fcx, fcy - s * 0.04, fcx, fcy + s * 0.1);
+    noseHL.addColorStop(0, 'rgba(255,235,210,0.4)');
+    noseHL.addColorStop(1, 'rgba(255,235,210,0)');
+    g.fillStyle = noseHL;
+    g.beginPath();
+    g.ellipse(fcx + s * 0.003, fcy + s * 0.02, s * 0.012, s * 0.08, 0, 0, Math.PI * 2);
+    g.fill();
+
+    // Nostril shadows (much darker)
+    [[-1], [1]].forEach(([side]) => {
+      g.fillStyle = 'rgba(40,15,5,0.7)';
+      g.beginPath();
+      g.ellipse(fcx + side * s * 0.03, fcy + s * 0.13, s * 0.02, s * 0.012, side * 0.3, 0, Math.PI * 2);
+      g.fill();
+    });
+
+    // --- Eye sockets (deep shadows) ---
+    [[-1], [1]].forEach(([side]) => {
+      const ex = fcx + side * s * 0.14;
+      const ey = fcy - s * 0.06;
+      const socketGrad = g.createRadialGradient(ex, ey, s * 0.01, ex, ey, s * 0.1);
+      socketGrad.addColorStop(0, 'rgba(60,30,15,0.5)');
+      socketGrad.addColorStop(0.6, 'rgba(90,50,30,0.3)');
+      socketGrad.addColorStop(1, 'rgba(120,70,40,0)');
+      g.fillStyle = socketGrad;
+      g.fillRect(ex - s * 0.12, ey - s * 0.08, s * 0.24, s * 0.16);
+    });
+
+    // --- Eyes (much larger for visibility at particle scale) ---
+    [[-1], [1]].forEach(([side]) => {
+      const ex = fcx + side * s * 0.14;
+      const ey = fcy - s * 0.06;
+      const eyeRx = s * 0.075;
+      const eyeRy = s * 0.035 * blink;
+
+      // Eye white
+      g.fillStyle = '#eae6e0';
+      g.beginPath();
+      g.ellipse(ex, ey, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+      g.fill();
+
+      // Eye white shadow (top, stronger)
+      const ewGrad = g.createLinearGradient(ex, ey - eyeRy, ex, ey + eyeRy * 0.3);
+      ewGrad.addColorStop(0, 'rgba(60,30,15,0.45)');
+      ewGrad.addColorStop(0.5, 'rgba(80,50,30,0.15)');
+      ewGrad.addColorStop(1, 'rgba(100,60,40,0)');
+      g.fillStyle = ewGrad;
+      g.beginPath();
+      g.ellipse(ex, ey, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+      g.fill();
+
+      if (blink > 0.2) {
+        // Iris (larger, bolder)
+        const irisR = s * 0.032;
+        const irisGrad = g.createRadialGradient(ex, ey, irisR * 0.1, ex, ey, irisR);
+        irisGrad.addColorStop(0, '#1a3a1a');
+        irisGrad.addColorStop(0.3, '#2a5a2a');
+        irisGrad.addColorStop(0.6, '#3d7a3d');
+        irisGrad.addColorStop(0.85, '#2a4a20');
+        irisGrad.addColorStop(1, '#1a3018');
+        g.fillStyle = irisGrad;
+        g.beginPath();
+        g.arc(ex, ey, irisR, 0, Math.PI * 2);
+        g.fill();
+
+        // Pupil (larger)
+        g.fillStyle = '#050505';
+        g.beginPath();
+        g.arc(ex, ey, s * 0.015, 0, Math.PI * 2);
+        g.fill();
+
+        // Catchlight (bigger)
+        g.fillStyle = 'rgba(255,255,255,0.95)';
+        g.beginPath();
+        g.arc(ex + s * 0.01, ey - s * 0.01, s * 0.007, 0, Math.PI * 2);
+        g.fill();
+        g.fillStyle = 'rgba(255,255,255,0.5)';
+        g.beginPath();
+        g.arc(ex - s * 0.006, ey + s * 0.006, s * 0.004, 0, Math.PI * 2);
+        g.fill();
+      }
+
+      // Eyelid crease (stronger)
+      g.strokeStyle = 'rgba(80,40,20,0.6)';
+      g.lineWidth = 2;
+      g.beginPath();
+      g.ellipse(ex, ey - eyeRy * 0.2, eyeRx * 1.08, eyeRy * 1.5, 0, Math.PI + 0.25, Math.PI * 2 - 0.25);
+      g.stroke();
+
+      // Eyelashes (upper, bolder)
+      g.strokeStyle = 'rgba(20,10,5,0.85)';
+      g.lineWidth = 2.5;
+      g.beginPath();
+      g.ellipse(ex, ey, eyeRx, eyeRy, 0, Math.PI + 0.1, Math.PI * 2 - 0.1);
+      g.stroke();
+
+      // Lower lash line
+      g.strokeStyle = 'rgba(40,20,10,0.4)';
+      g.lineWidth = 1;
+      g.beginPath();
+      g.ellipse(ex, ey, eyeRx * 0.95, eyeRy * 0.9, 0, 0.15, Math.PI - 0.15);
+      g.stroke();
+    });
+
+    // --- Eyebrows (much thicker, bolder) ---
+    [[-1], [1]].forEach(([side]) => {
+      const bx = fcx + side * s * 0.14;
+      const by = fcy - s * 0.13;
+      // Thick main stroke
+      g.strokeStyle = 'rgba(35,18,8,0.9)';
+      g.lineWidth = s * 0.02;
+      g.lineCap = 'round';
+      g.beginPath();
+      g.moveTo(bx - side * s * 0.065, by + s * 0.012);
+      g.quadraticCurveTo(bx, by - s * 0.018, bx + side * s * 0.065, by + s * 0.008);
+      g.stroke();
+      // Fill for density
+      g.fillStyle = 'rgba(35,18,8,0.7)';
+      g.beginPath();
+      g.moveTo(bx - side * s * 0.065, by + s * 0.012);
+      g.quadraticCurveTo(bx, by - s * 0.025, bx + side * s * 0.065, by + s * 0.008);
+      g.quadraticCurveTo(bx, by + s * 0.008, bx - side * s * 0.065, by + s * 0.012);
+      g.fill();
+    });
+
+    // --- Mouth ---
+    const my = fcy + s * 0.22;
+    const mw = s * 0.1;
+    const mh = s * 0.015 + mouthOpen;
+
+    // Mouth interior (dark, always slightly visible)
+    g.fillStyle = mouthOpen > 1.5 ? '#1a0505' : 'rgba(100,40,30,0.6)';
+    g.beginPath();
+    g.ellipse(fcx, my, mw * 0.9, Math.max(mh * 0.5, s * 0.008), 0, 0, Math.PI * 2);
+    g.fill();
+
+    // Teeth
+    if (mouthOpen > 3) {
+      g.fillStyle = '#e8e4dc';
+      const tw = mw * 0.6;
+      const th = Math.min(mh * 0.22, s * 0.02);
+      g.beginPath();
+      g.roundRect(fcx - tw, my - mh * 0.3, tw * 2, th, 2);
+      g.fill();
     }
 
-    // Particle allocation
-    const alloc = {
-      headFill: 0.25, headOutline: 0.08,
-      eyeWhiteL: 0.04, eyeWhiteR: 0.04,
-      irisL: 0.03, irisR: 0.03,
-      pupilL: 0.015, pupilR: 0.015,
-      browL: 0.02, browR: 0.02,
-      noseBridge: 0.02, noseTip: 0.02,
-      upperLip: 0.03, lowerLip: 0.03,
-      mouthInner: 0.04, teeth: 0.02,
-      cheekL: 0.03, cheekR: 0.03,
-      foreheadLines: 0.015,
-      nasolabialL: 0.015, nasolabialR: 0.015,
-      chin: 0.02,
-    };
-    const counts = {};
-    let used = 0;
-    for (const [k, v] of Object.entries(alloc)) {
-      counts[k] = Math.floor(PARTICLE_COUNT * v);
-      used += counts[k];
-    }
-    counts.headFill += (PARTICLE_COUNT - used); // remainder to head fill
+    // Upper lip (bolder, darker)
+    g.fillStyle = '#a04535';
+    g.beginPath();
+    g.moveTo(fcx - mw, my - mh * 0.15);
+    g.quadraticCurveTo(fcx - mw * 0.5, my - mh * 0.65, fcx, my - mh * 0.35);
+    g.quadraticCurveTo(fcx + mw * 0.5, my - mh * 0.65, fcx + mw, my - mh * 0.15);
+    g.quadraticCurveTo(fcx, my + mh * 0.1, fcx - mw, my - mh * 0.15);
+    g.fill();
 
-    const eyeY = cy - s * 0.08;
-    const eyeSpacing = s * 0.155;
+    // Lower lip (fuller, stronger color)
+    g.fillStyle = '#b85550';
+    g.beginPath();
+    g.moveTo(fcx - mw * 0.9, my + mh * 0.08);
+    g.quadraticCurveTo(fcx, my + mh * 0.75, fcx + mw * 0.9, my + mh * 0.08);
+    g.quadraticCurveTo(fcx, my + mh * 0.2, fcx - mw * 0.9, my + mh * 0.08);
+    g.fill();
 
-    // --- HEAD FILL (face surface with density gradient) ---
-    for (let i = 0; i < counts.headFill; i++) {
-      const t = Math.random() * Math.PI * 2;
-      const r = Math.random();
-      // Egg shape: wider at top, narrower at chin
-      const yFactor = Math.sin(t) * 0.5 + 0.5;
-      const rxBase = s * (0.38 - yFactor * 0.06);
-      const ryBase = s * 0.48;
-      const x = cx + Math.cos(t) * rxBase * r;
-      const y = cy + Math.sin(t) * ryBase * r;
-      const [rx, ry] = rot(x, y);
-      points.push(rx, ry);
-    }
+    // Lip line (dark seam)
+    g.strokeStyle = 'rgba(60,20,15,0.7)';
+    g.lineWidth = 1.5;
+    g.beginPath();
+    g.moveTo(fcx - mw, my);
+    g.quadraticCurveTo(fcx, my - mh * 0.05, fcx + mw, my);
+    g.stroke();
 
-    // --- HEAD OUTLINE ---
-    for (let i = 0; i < counts.headOutline; i++) {
-      const t = (i / counts.headOutline) * Math.PI * 2;
-      const yFactor = Math.sin(t) * 0.5 + 0.5;
-      const rxBase = s * (0.38 - yFactor * 0.06);
-      const ryBase = s * 0.48;
-      const thick = 0.97 + Math.random() * 0.06;
-      const x = cx + Math.cos(t) * rxBase * thick;
-      const y = cy + Math.sin(t) * ryBase * thick;
-      const [rx, ry] = rot(x, y);
-      points.push(rx, ry);
-    }
+    // Nasolabial folds (stronger)
+    [[-1], [1]].forEach(([side]) => {
+      g.strokeStyle = 'rgba(100,55,30,0.35)';
+      g.lineWidth = 2.5;
+      g.beginPath();
+      g.moveTo(fcx + side * s * 0.06, fcy + s * 0.04);
+      g.quadraticCurveTo(fcx + side * s * 0.11, fcy + s * 0.14, fcx + side * s * 0.1, my - s * 0.01);
+      g.stroke();
+    });
 
-    // --- EYES (almond shape) ---
-    function almondEye(ecx, count) {
-      for (let i = 0; i < count; i++) {
-        const t = (i / count) * Math.PI * 2;
-        const rx = s * 0.075;
-        const ry = s * 0.032 * blink;
-        // Almond shape: sharper at corners
-        const squeeze = 1 - 0.3 * Math.pow(Math.cos(t), 4);
-        const fill = 0.2 + Math.random() * 0.8;
-        const x = ecx + Math.cos(t) * rx * fill * squeeze;
-        const y = eyeY + Math.sin(t) * ry * fill;
-        const [rx2, ry2] = rot(x, y);
-        points.push(rx2, ry2);
+    // Chin shadow
+    const chinGrad = g.createRadialGradient(fcx, fcy + s * 0.35, 0, fcx, fcy + s * 0.35, s * 0.1);
+    chinGrad.addColorStop(0, 'rgba(140,90,60,0.15)');
+    chinGrad.addColorStop(1, 'rgba(140,90,60,0)');
+    g.fillStyle = chinGrad;
+    g.fillRect(fcx - s * 0.15, fcy + s * 0.28, s * 0.3, s * 0.15);
+
+    g.restore();
+
+    // --- Sample ALL pixels from rendered face ---
+    const imgData = g.getImageData(0, 0, oc.width, oc.height);
+    const pixels = imgData.data;
+    const samplePoints = [];
+
+    // Sample every pixel (canvas is small enough)
+    for (let y = 0; y < oc.height; y++) {
+      for (let x = 0; x < oc.width; x++) {
+        const idx = (y * oc.width + x) * 4;
+        const r = pixels[idx], gr = pixels[idx + 1], b = pixels[idx + 2], a = pixels[idx + 3];
+        if (a > 20 && (r > 15 || gr > 15 || b > 15)) {
+          samplePoints.push(x, y, r, gr, b);
+        }
       }
     }
-    almondEye(cx - eyeSpacing, counts.eyeWhiteL);
-    almondEye(cx + eyeSpacing, counts.eyeWhiteR);
 
-    // --- IRIS ---
-    function iris(ecx, count) {
-      for (let i = 0; i < count; i++) {
-        const t = (i / count) * Math.PI * 2;
-        const r = s * 0.028 * (0.4 + Math.random() * 0.6);
-        const x = ecx + Math.cos(t) * r;
-        const y = eyeY + Math.sin(t) * r * blink * 0.85;
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
-      }
-    }
-    iris(cx - eyeSpacing, counts.irisL);
-    iris(cx + eyeSpacing, counts.irisR);
-
-    // --- PUPILS ---
-    function pupil(ecx, count) {
-      for (let i = 0; i < count; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        const r = Math.random() * s * 0.012;
-        const x = ecx + Math.cos(angle) * r;
-        const y = eyeY + Math.sin(angle) * r * blink;
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
-      }
-    }
-    pupil(cx - eyeSpacing, counts.pupilL);
-    pupil(cx + eyeSpacing, counts.pupilR);
-
-    // --- EYEBROWS (arched, thick) ---
-    function eyebrow(ecx, count, side) {
-      const by = cy - s * 0.18 - browRaise * s;
-      for (let i = 0; i < count; i++) {
-        const t = i / count;
-        const span = s * 0.1;
-        const x = ecx - span * 0.5 + t * span;
-        // Natural arch
-        const arch = -Math.sin(t * Math.PI) * s * 0.022;
-        // Slight angle: higher on outer edge
-        const tilt = (side === 'L' ? (1 - t) : t) * s * 0.008;
-        const y = by + arch - tilt + (Math.random() - 0.5) * s * 0.008;
-        // Thickness
-        const yOff = (Math.random() - 0.5) * s * 0.012;
-        const [rx, ry] = rot(x, y + yOff);
-        points.push(rx, ry);
-      }
-    }
-    eyebrow(cx - eyeSpacing, counts.browL, 'L');
-    eyebrow(cx + eyeSpacing, counts.browR, 'R');
-
-    // --- NOSE BRIDGE ---
-    for (let i = 0; i < counts.noseBridge; i++) {
-      const t = i / counts.noseBridge;
-      const x = cx + (Math.random() - 0.5) * s * 0.02;
-      const y = cy - s * 0.04 + t * s * 0.2;
-      // Subtle widening toward tip
-      const xOff = (Math.random() - 0.5) * (s * 0.01 + t * s * 0.015);
-      const [rx, ry] = rot(x + xOff, y);
-      points.push(rx, ry);
-    }
-
-    // --- NOSE TIP (bulb + nostrils) ---
-    for (let i = 0; i < counts.noseTip; i++) {
-      const t = i / counts.noseTip;
-      if (t < 0.5) {
-        // Nose bulb
-        const angle = (t / 0.5) * Math.PI * 2;
-        const r = s * 0.035 * (0.5 + Math.random() * 0.5);
-        const x = cx + Math.cos(angle) * r;
-        const y = cy + s * 0.16 + Math.sin(angle) * r * 0.6;
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
-      } else {
-        // Nostrils
-        const side = t < 0.75 ? -1 : 1;
-        const angle = Math.random() * Math.PI;
-        const r = s * 0.018 * Math.random();
-        const x = cx + side * s * 0.03 + Math.cos(angle) * r;
-        const y = cy + s * 0.17 + Math.sin(angle) * r * 0.5;
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
+    // Shuffle
+    const numPts = samplePoints.length / 5;
+    for (let i = numPts - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      for (let k = 0; k < 5; k++) {
+        const tmp = samplePoints[i * 5 + k];
+        samplePoints[i * 5 + k] = samplePoints[j * 5 + k];
+        samplePoints[j * 5 + k] = tmp;
       }
     }
 
-    // --- MOUTH ---
-    const mouthY = cy + s * 0.3;
-    const mouthW = s * 0.14;
-    const mouthH = s * 0.015 + mouthOpen * s * 0.1;
+    // Scale up and center on screen
+    const displayW = faceW * displayScale;
+    const displayH = faceH * displayScale;
+    const offX = centerX - displayW / 2;
+    const offY = centerY - displayH / 2;
 
-    // Upper lip (with cupid's bow)
-    for (let i = 0; i < counts.upperLip; i++) {
-      const t = i / counts.upperLip;
-      const x = cx - mouthW + t * mouthW * 2;
-      const bow = Math.sin(t * Math.PI * 2) * s * 0.008;
-      const curve = -Math.sin(t * Math.PI) * s * 0.006;
-      const thickness = (Math.random() - 0.5) * s * 0.012;
-      const y = mouthY - mouthH * 0.5 + bow + curve + thickness;
-      const [rx, ry] = rot(x, y);
-      points.push(rx, ry);
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      const si = (i % numPts) * 5;
+      tx[i] = samplePoints[si] * displayScale + offX + (Math.random() - 0.5) * 0.5;
+      ty[i] = samplePoints[si + 1] * displayScale + offY + (Math.random() - 0.5) * 0.5;
+      pR[i] = samplePoints[si + 2];
+      pG[i] = samplePoints[si + 3];
+      pB[i] = samplePoints[si + 4];
+      useCustomColor[i] = 1;
+      hasTarget[i] = 1;
+      size[i] = displayScale * 0.7; // bigger particles to fill gaps
+      alpha[i] = 0.85;
     }
-
-    // Lower lip (fuller)
-    for (let i = 0; i < counts.lowerLip; i++) {
-      const t = i / counts.lowerLip;
-      const x = cx - mouthW * 0.9 + t * mouthW * 1.8;
-      const curve = Math.sin(t * Math.PI) * s * 0.018;
-      const thickness = (Math.random() - 0.5) * s * 0.015;
-      const y = mouthY + mouthH * 0.5 + curve + thickness;
-      const [rx, ry] = rot(x, y);
-      points.push(rx, ry);
-    }
-
-    // Mouth interior
-    for (let i = 0; i < counts.mouthInner; i++) {
-      const t = Math.random();
-      const x = cx + (Math.random() - 0.5) * mouthW * 1.4;
-      const y = mouthY + (Math.random() - 0.5) * mouthH * 0.7;
-      const [rx, ry] = rot(x, y);
-      points.push(rx, ry);
-    }
-
-    // Teeth (visible when mouth open)
-    if (mouthOpen > 0.3) {
-      for (let i = 0; i < counts.teeth; i++) {
-        const t = i / counts.teeth;
-        const x = cx - mouthW * 0.6 + t * mouthW * 1.2;
-        const y = mouthY - mouthH * 0.25 + (Math.random() * s * 0.015);
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
-      }
-    } else {
-      // Still place particles, just on the lips
-      for (let i = 0; i < counts.teeth; i++) {
-        const t = i / counts.teeth;
-        const x = cx - mouthW + t * mouthW * 2;
-        const y = mouthY + (Math.random() - 0.5) * s * 0.01;
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
-      }
-    }
-
-    // --- CHEEKBONES ---
-    function cheek(side, count) {
-      for (let i = 0; i < count; i++) {
-        const angle = Math.random() * Math.PI * 0.8 + Math.PI * 0.1;
-        const r = s * 0.06 * (0.3 + Math.random() * 0.7);
-        const x = cx + side * s * 0.27 + Math.cos(angle) * r;
-        const y = cy + s * 0.08 + Math.sin(angle) * r * 0.5;
-        const [rx, ry] = rot(x, y);
-        points.push(rx, ry);
-      }
-    }
-    cheek(-1, counts.cheekL);
-    cheek(1, counts.cheekR);
-
-    // --- FOREHEAD LINES (subtle, when brows raised) ---
-    for (let i = 0; i < counts.foreheadLines; i++) {
-      const line = Math.floor(Math.random() * 3);
-      const t = Math.random();
-      const x = cx - s * 0.2 + t * s * 0.4;
-      const y = cy - s * 0.28 - line * s * 0.03 + Math.sin(t * Math.PI) * s * 0.005;
-      const [rx, ry] = rot(x, y + (Math.random() - 0.5) * 2);
-      points.push(rx, ry);
-    }
-
-    // --- NASOLABIAL FOLDS ---
-    function nasolabial(side, count) {
-      for (let i = 0; i < count; i++) {
-        const t = i / count;
-        const x = cx + side * (s * 0.08 + t * s * 0.06);
-        const y = cy + s * 0.1 + t * s * 0.22;
-        const [rx, ry] = rot(x + (Math.random() - 0.5) * 2, y + (Math.random() - 0.5) * 2);
-        points.push(rx, ry);
-      }
-    }
-    nasolabial(-1, counts.nasolabialL);
-    nasolabial(1, counts.nasolabialR);
-
-    // --- CHIN ---
-    for (let i = 0; i < counts.chin; i++) {
-      const angle = Math.random() * Math.PI;
-      const r = s * 0.05 * (0.3 + Math.random() * 0.7);
-      const x = cx + Math.cos(angle + Math.PI) * r;
-      const y = cy + s * 0.42 + Math.sin(angle) * r * 0.4;
-      const [rx, ry] = rot(x, y);
-      points.push(rx, ry);
-    }
-
-    assignTargetsFlat(points);
   },
 
   text() {
@@ -954,10 +1015,14 @@ function animate(timestamp) {
     lastTime = timestamp;
   }
   time++;
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+  if (currentMode === 'face') {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  } else {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+  }
   ctx.fillRect(0, 0, width, height);
   if (currentMode === 'swarm') buildGrid();
-  if (currentMode === 'face' || currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral') {
+  if (currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral') {
     formations[currentMode]();
   }
   updateParticles();
@@ -1006,6 +1071,14 @@ soundToggleBtn.addEventListener('click', () => {
 
 // Override switchMode to not auto-start sound unless toggle is on
 function switchMode(mode) {
+  if (mode !== 'face') {
+    clearCustomColors();
+    // Reset particle sizes
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      size[i] = PARTICLE_SIZE * (0.6 + Math.random() * 0.5);
+      alpha[i] = 0.6 + Math.random() * 0.4;
+    }
+  }
   currentMode = mode;
   formations[currentMode]();
   if (soundStarted) createSound(mode);
