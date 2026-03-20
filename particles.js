@@ -1,6 +1,6 @@
 // ============================================================
 // PARTICLE SWARM ENGINE
-// 5000 particles with Boids flocking + target morphing
+// 20000 particles with Spatial Grid + Boids flocking + morphing
 // ============================================================
 
 const canvas = document.getElementById('canvas');
@@ -8,32 +8,48 @@ const ctx = canvas.getContext('2d');
 const fpsEl = document.getElementById('fps');
 
 // --- Config ---
-const PARTICLE_COUNT = 5000;
-const PARTICLE_SIZE = 1.8;
+const PARTICLE_COUNT = 20000;
+const PARTICLE_SIZE = 1.2;
 const MAX_SPEED = 4;
 const MORPH_SPEED = 0.04;
-const MOUSE_RADIUS = 120;
+const MOUSE_RADIUS = 150;
 const MOUSE_FORCE = 0.8;
 
 // Boids parameters
 const BOIDS = {
-  separation: 0.035,
-  alignment: 0.02,
-  cohesion: 0.015,
-  separationDist: 20,
-  neighborDist: 50,
+  separation: 0.04,
+  alignment: 0.025,
+  cohesion: 0.018,
+  separationDist: 12,
+  neighborDist: 35,
 };
 
 // --- State ---
 let width, height, centerX, centerY;
 let mouse = { x: -9999, y: -9999, active: false };
 let currentMode = 'swarm';
-let particles = [];
-let targetPoints = [];
 let time = 0;
 let lastTime = performance.now();
 let frameCount = 0;
 let fps = 0;
+
+// Flat arrays for performance (SoA layout)
+const px = new Float32Array(PARTICLE_COUNT);
+const py = new Float32Array(PARTICLE_COUNT);
+const vx = new Float32Array(PARTICLE_COUNT);
+const vy = new Float32Array(PARTICLE_COUNT);
+const tx = new Float32Array(PARTICLE_COUNT);
+const ty = new Float32Array(PARTICLE_COUNT);
+const hasTarget = new Uint8Array(PARTICLE_COUNT);
+const hue = new Float32Array(PARTICLE_COUNT);
+const alpha = new Float32Array(PARTICLE_COUNT);
+const size = new Float32Array(PARTICLE_COUNT);
+
+// Spatial grid
+const GRID_SIZE = 40;
+let gridCols, gridRows;
+let grid = [];
+let gridCounts = [];
 
 // --- Resize ---
 function resize() {
@@ -41,137 +57,220 @@ function resize() {
   height = canvas.height = window.innerHeight;
   centerX = width / 2;
   centerY = height / 2;
+  gridCols = Math.ceil(width / GRID_SIZE) + 1;
+  gridRows = Math.ceil(height / GRID_SIZE) + 1;
+  const totalCells = gridCols * gridRows;
+  grid = new Array(totalCells);
+  gridCounts = new Int32Array(totalCells);
+  for (let i = 0; i < totalCells; i++) {
+    grid[i] = new Int32Array(64); // max 64 per cell
+  }
 }
 window.addEventListener('resize', resize);
 resize();
 
-// --- Particle Class ---
-class Particle {
-  constructor(i) {
-    this.index = i;
-    this.x = Math.random() * width;
-    this.y = Math.random() * height;
-    this.vx = (Math.random() - 0.5) * 2;
-    this.vy = (Math.random() - 0.5) * 2;
-    this.tx = this.x;
-    this.ty = this.y;
-    this.hasTarget = false;
-    this.hue = 220 + Math.random() * 40;
-    this.alpha = 0.6 + Math.random() * 0.4;
-    this.size = PARTICLE_SIZE * (0.7 + Math.random() * 0.6);
+// --- Init ---
+function init() {
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    px[i] = Math.random() * width;
+    py[i] = Math.random() * height;
+    vx[i] = (Math.random() - 0.5) * 2;
+    vy[i] = (Math.random() - 0.5) * 2;
+    tx[i] = px[i];
+    ty[i] = py[i];
+    hasTarget[i] = 0;
+    hue[i] = 220 + Math.random() * 40;
+    alpha[i] = 0.6 + Math.random() * 0.4;
+    size[i] = PARTICLE_SIZE * (0.6 + Math.random() * 0.5);
   }
+}
 
-  update(dt) {
-    if (this.hasTarget) {
+// --- Build spatial grid ---
+function buildGrid() {
+  const totalCells = gridCols * gridRows;
+  for (let c = 0; c < totalCells; c++) gridCounts[c] = 0;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const col = Math.floor(px[i] / GRID_SIZE);
+    const row = Math.floor(py[i] / GRID_SIZE);
+    if (col >= 0 && col < gridCols && row >= 0 && row < gridRows) {
+      const cell = row * gridCols + col;
+      const count = gridCounts[cell];
+      if (count < 64) {
+        grid[cell][count] = i;
+        gridCounts[cell] = count + 1;
+      }
+    }
+  }
+}
+
+// --- Update particles ---
+function updateParticles() {
+  const sepDist2 = BOIDS.separationDist * BOIDS.separationDist;
+  const nDist2 = BOIDS.neighborDist * BOIDS.neighborDist;
+  const mouseActive = mouse.active;
+  const mx = mouse.x, my = mouse.y;
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    let ax = 0, ay = 0;
+
+    if (hasTarget[i]) {
       // Morph toward target
-      const dx = this.tx - this.x;
-      const dy = this.ty - this.y;
-      this.vx += dx * MORPH_SPEED;
-      this.vy += dy * MORPH_SPEED;
-      this.vx *= 0.92;
-      this.vy *= 0.92;
+      const dx = tx[i] - px[i];
+      const dy = ty[i] - py[i];
+      ax = dx * MORPH_SPEED;
+      ay = dy * MORPH_SPEED;
+      vx[i] = (vx[i] + ax) * 0.92;
+      vy[i] = (vy[i] + ay) * 0.92;
     } else {
-      // Boids flocking (spatial grid optimized)
-      this.flock();
+      // Boids via spatial grid
+      let sepX = 0, sepY = 0, sepCount = 0;
+      let alignX = 0, alignY = 0;
+      let cohX = 0, cohY = 0, neighborCount = 0;
+
+      const col = Math.floor(px[i] / GRID_SIZE);
+      const row = Math.floor(py[i] / GRID_SIZE);
+
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          const nc = col + dc;
+          const nr = row + dr;
+          if (nc < 0 || nc >= gridCols || nr < 0 || nr >= gridRows) continue;
+          const cell = nr * gridCols + nc;
+          const count = gridCounts[cell];
+          for (let k = 0; k < count; k++) {
+            const j = grid[cell][k];
+            if (j === i) continue;
+            const dx = px[j] - px[i];
+            const dy = py[j] - py[i];
+            const dist2 = dx * dx + dy * dy;
+
+            if (dist2 < sepDist2 && dist2 > 0) {
+              const d = Math.sqrt(dist2);
+              sepX -= dx / d;
+              sepY -= dy / d;
+              sepCount++;
+            }
+            if (dist2 < nDist2) {
+              alignX += vx[j];
+              alignY += vy[j];
+              cohX += px[j];
+              cohY += py[j];
+              neighborCount++;
+            }
+          }
+        }
+      }
+
+      if (sepCount > 0) {
+        vx[i] += (sepX / sepCount) * BOIDS.separation;
+        vy[i] += (sepY / sepCount) * BOIDS.separation;
+      }
+      if (neighborCount > 0) {
+        vx[i] += (alignX / neighborCount - vx[i]) * BOIDS.alignment;
+        vy[i] += (alignY / neighborCount - vy[i]) * BOIDS.alignment;
+        vx[i] += (cohX / neighborCount - px[i]) * BOIDS.cohesion * 0.01;
+        vy[i] += (cohY / neighborCount - py[i]) * BOIDS.cohesion * 0.01;
+      }
+
       // Gentle drift
-      this.vx += (Math.random() - 0.5) * 0.1;
-      this.vy += (Math.random() - 0.5) * 0.1;
+      vx[i] += (Math.random() - 0.5) * 0.1;
+      vy[i] += (Math.random() - 0.5) * 0.1;
     }
 
-    // Mouse interaction
-    if (mouse.active) {
-      const dx = this.x - mouse.x;
-      const dy = this.y - mouse.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < MOUSE_RADIUS && dist > 0) {
+    // Mouse repulsion
+    if (mouseActive) {
+      const dx = px[i] - mx;
+      const dy = py[i] - my;
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 < MOUSE_RADIUS * MOUSE_RADIUS && dist2 > 0) {
+        const dist = Math.sqrt(dist2);
         const force = (1 - dist / MOUSE_RADIUS) * MOUSE_FORCE;
-        this.vx += (dx / dist) * force;
-        this.vy += (dy / dist) * force;
+        vx[i] += (dx / dist) * force;
+        vy[i] += (dy / dist) * force;
       }
     }
 
     // Speed limit
-    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-    if (speed > MAX_SPEED) {
-      this.vx = (this.vx / speed) * MAX_SPEED;
-      this.vy = (this.vy / speed) * MAX_SPEED;
+    const speed2 = vx[i] * vx[i] + vy[i] * vy[i];
+    if (speed2 > MAX_SPEED * MAX_SPEED) {
+      const speed = Math.sqrt(speed2);
+      vx[i] = (vx[i] / speed) * MAX_SPEED;
+      vy[i] = (vy[i] / speed) * MAX_SPEED;
     }
 
-    this.x += this.vx;
-    this.y += this.vy;
+    px[i] += vx[i];
+    py[i] += vy[i];
 
     // Soft boundary wrapping
-    const margin = 50;
-    if (this.x < -margin) this.x = width + margin;
-    if (this.x > width + margin) this.x = -margin;
-    if (this.y < -margin) this.y = height + margin;
-    if (this.y > height + margin) this.y = -margin;
+    if (px[i] < -50) px[i] = width + 50;
+    if (px[i] > width + 50) px[i] = -50;
+    if (py[i] < -50) py[i] = height + 50;
+    if (py[i] > height + 50) py[i] = -50;
   }
+}
 
-  flock() {
-    let sepX = 0, sepY = 0;
-    let alignX = 0, alignY = 0;
-    let cohX = 0, cohY = 0;
-    let sepCount = 0, neighborCount = 0;
+// --- Draw particles using ImageData for max performance ---
+function drawParticles() {
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
 
-    // Sample neighbors (not all — performance)
-    const step = Math.max(1, Math.floor(PARTICLE_COUNT / 200));
-    for (let i = 0; i < PARTICLE_COUNT; i += step) {
-      if (i === this.index) continue;
-      const other = particles[i];
-      const dx = other.x - this.x;
-      const dy = other.y - this.y;
-      const dist = dx * dx + dy * dy;
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    const ix = px[i] | 0;
+    const iy = py[i] | 0;
+    if (ix < 0 || ix >= width || iy < 0 || iy >= height) continue;
 
-      if (dist < BOIDS.separationDist * BOIDS.separationDist && dist > 0) {
-        const d = Math.sqrt(dist);
-        sepX -= dx / d;
-        sepY -= dy / d;
-        sepCount++;
+    const speed = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i]);
+    const h = (hue[i] + speed * 15 + time * 0.2) % 360;
+    const l = Math.min(80, 50 + speed * 12);
+    const a = alpha[i];
+
+    // HSL to RGB (fast approximation)
+    const c = (1 - Math.abs(2 * l / 100 - 1)) * 0.8;
+    const x2 = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = l / 100 - c / 2;
+    let r, g, b;
+    if (h < 60) { r = c; g = x2; b = 0; }
+    else if (h < 120) { r = x2; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x2; }
+    else if (h < 240) { r = 0; g = x2; b = c; }
+    else if (h < 300) { r = c; g = 0; b = x2; }
+    else { r = x2; g = 0; b = c; }
+
+    const rr = ((r + m) * 255) | 0;
+    const gg = ((g + m) * 255) | 0;
+    const bb = ((b + m) * 255) | 0;
+    const aa = (a * 255) | 0;
+
+    // Draw 2x2 pixel block for visibility
+    const s = size[i] > 1 ? 2 : 1;
+    for (let dy = 0; dy < s; dy++) {
+      for (let dx = 0; dx < s; dx++) {
+        const fx = ix + dx;
+        const fy = iy + dy;
+        if (fx >= width || fy >= height) continue;
+        const idx = (fy * width + fx) * 4;
+        // Alpha blend
+        const srcA = aa / 255;
+        data[idx]     = Math.min(255, data[idx] + rr * srcA) | 0;
+        data[idx + 1] = Math.min(255, data[idx + 1] + gg * srcA) | 0;
+        data[idx + 2] = Math.min(255, data[idx + 2] + bb * srcA) | 0;
+        data[idx + 3] = 255;
       }
-
-      if (dist < BOIDS.neighborDist * BOIDS.neighborDist) {
-        alignX += other.vx;
-        alignY += other.vy;
-        cohX += other.x;
-        cohY += other.y;
-        neighborCount++;
-      }
-    }
-
-    if (sepCount > 0) {
-      this.vx += (sepX / sepCount) * BOIDS.separation;
-      this.vy += (sepY / sepCount) * BOIDS.separation;
-    }
-    if (neighborCount > 0) {
-      this.vx += (alignX / neighborCount - this.vx) * BOIDS.alignment;
-      this.vy += (alignY / neighborCount - this.vy) * BOIDS.alignment;
-      this.vx += (cohX / neighborCount - this.x) * BOIDS.cohesion * 0.01;
-      this.vy += (cohY / neighborCount - this.y) * BOIDS.cohesion * 0.01;
     }
   }
 
-  draw() {
-    // Dynamic color based on velocity
-    const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-    const hue = this.hue + speed * 15 + time * 0.2;
-    const brightness = 50 + speed * 12;
-
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
-    ctx.fillStyle = `hsla(${hue}, 80%, ${brightness}%, ${this.alpha})`;
-    ctx.fill();
-  }
+  ctx.putImageData(imgData, 0, 0);
 }
 
 // --- Target Generators ---
 const formations = {
   swarm() {
-    particles.forEach(p => { p.hasTarget = false; });
+    for (let i = 0; i < PARTICLE_COUNT; i++) hasTarget[i] = 0;
   },
 
   text() {
-    const points = getTextPoints('HELLO', 140);
+    const points = getTextPoints('HELLO', 160);
     assignTargets(points);
   },
 
@@ -181,9 +280,9 @@ const formations = {
       const t = i / PARTICLE_COUNT;
       const x = centerX - width * 0.35 + t * width * 0.7;
       const y = centerY + Math.sin(t * Math.PI * 4 + time * 0.02) * height * 0.25;
-      points.push({ x, y });
+      points.push(x, y);
     }
-    assignTargets(points);
+    assignTargetsFlat(points);
   },
 
   chart() {
@@ -194,7 +293,6 @@ const formations = {
     const totalWidth = barCount * barWidth + (barCount - 1) * gap;
     const startX = centerX - totalWidth / 2;
     const baseY = centerY + height * 0.2;
-
     const values = [0.4, 0.7, 0.5, 0.9, 0.6, 0.8, 0.3, 0.75];
     const perBar = Math.floor(PARTICLE_COUNT / barCount);
 
@@ -202,89 +300,131 @@ const formations = {
       const barH = values[b] * height * 0.45;
       const bx = startX + b * (barWidth + gap);
       for (let i = 0; i < perBar; i++) {
-        const x = bx + Math.random() * barWidth;
-        const y = baseY - Math.random() * barH;
-        points.push({ x, y });
+        points.push(bx + Math.random() * barWidth, baseY - Math.random() * barH);
       }
     }
-
-    // Fill remaining
-    while (points.length < PARTICLE_COUNT) {
+    while (points.length / 2 < PARTICLE_COUNT) {
       const b = Math.floor(Math.random() * barCount);
       const barH = values[b] * height * 0.45;
       const bx = startX + b * (barWidth + gap);
-      points.push({ x: bx + Math.random() * barWidth, y: baseY - Math.random() * barH });
+      points.push(bx + Math.random() * barWidth, baseY - Math.random() * barH);
     }
-
-    assignTargets(points);
+    assignTargetsFlat(points);
   },
 
   sphere() {
     const points = [];
     const radius = Math.min(width, height) * 0.28;
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      // Fibonacci sphere projection
       const phi = Math.acos(1 - 2 * (i + 0.5) / PARTICLE_COUNT);
       const theta = Math.PI * (1 + Math.sqrt(5)) * i;
-      const x = centerX + radius * Math.sin(phi) * Math.cos(theta + time * 0.005);
-      const y = centerY + radius * Math.cos(phi);
-      points.push({ x, y });
+      points.push(
+        centerX + radius * Math.sin(phi) * Math.cos(theta + time * 0.005),
+        centerY + radius * Math.cos(phi)
+      );
     }
-    assignTargets(points);
+    assignTargetsFlat(points);
   },
 
   dna() {
     const points = [];
-    const amplitude = Math.min(width, height) * 0.12;
-    const verticalSpan = height * 0.7;
+    const amplitude = Math.min(width, height) * 0.15;
+    const verticalSpan = height * 0.8;
     const startY = centerY - verticalSpan / 2;
+    const turns = 8;
+    const rungSpacing = 25;
 
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const t = i / PARTICLE_COUNT;
+    const strandCount = Math.floor(PARTICLE_COUNT * 0.38);
+    const rungTotal = PARTICLE_COUNT - strandCount * 2;
+
+    // Strand 1
+    for (let i = 0; i < strandCount; i++) {
+      const t = i / strandCount;
       const y = startY + t * verticalSpan;
-      const angle = t * Math.PI * 6 + time * 0.01;
+      const angle = t * Math.PI * 2 * turns + time * 0.012;
+      const x = centerX + Math.sin(angle) * amplitude;
+      const off = (Math.random() - 0.5) * 3;
+      points.push(x + off, y + off);
+    }
 
-      // Two strands
-      if (i % 2 === 0) {
-        const x = centerX + Math.sin(angle) * amplitude;
-        points.push({ x, y });
-      } else {
-        const x = centerX + Math.sin(angle + Math.PI) * amplitude;
-        points.push({ x, y });
+    // Strand 2
+    for (let i = 0; i < strandCount; i++) {
+      const t = i / strandCount;
+      const y = startY + t * verticalSpan;
+      const angle = t * Math.PI * 2 * turns + time * 0.012 + Math.PI;
+      const x = centerX + Math.sin(angle) * amplitude;
+      const off = (Math.random() - 0.5) * 3;
+      points.push(x + off, y + off);
+    }
+
+    // Rungs (base pairs)
+    const numRungs = Math.floor(verticalSpan / rungSpacing);
+    const perRung = Math.floor(rungTotal / numRungs);
+    for (let r = 0; r < numRungs; r++) {
+      const t = r / numRungs;
+      const y = startY + t * verticalSpan;
+      const angle = t * Math.PI * 2 * turns + time * 0.012;
+      const x1 = centerX + Math.sin(angle) * amplitude;
+      const x2 = centerX + Math.sin(angle + Math.PI) * amplitude;
+      for (let i = 0; i < perRung; i++) {
+        const lerp = i / perRung;
+        const x = x1 + (x2 - x1) * lerp;
+        const jit = (Math.random() - 0.5) * 2;
+        points.push(x + jit, y + jit);
       }
     }
-    assignTargets(points);
+
+    while (points.length / 2 < PARTICLE_COUNT) {
+      const t = Math.random();
+      const y = startY + t * verticalSpan;
+      const angle = t * Math.PI * 2 * turns + time * 0.012;
+      const strand = Math.random() > 0.5 ? 0 : Math.PI;
+      points.push(centerX + Math.sin(angle + strand) * amplitude, y);
+    }
+
+    assignTargetsFlat(points);
   },
 
   heart() {
     const points = [];
-    const scale = Math.min(width, height) * 0.012;
+    const scale = Math.min(width, height) * 0.014;
     for (let i = 0; i < PARTICLE_COUNT; i++) {
       const t = (i / PARTICLE_COUNT) * Math.PI * 2;
-      // Heart parametric equation
       const hx = 16 * Math.pow(Math.sin(t), 3);
       const hy = -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t));
-      // Add some fill (random offset toward center)
-      const fill = Math.random() * 0.8 + 0.2;
-      const x = centerX + hx * scale * fill;
-      const y = centerY + hy * scale * fill - 20;
-      points.push({ x, y });
+      const fill = Math.random() * 0.85 + 0.15;
+      points.push(centerX + hx * scale * fill, centerY + hy * scale * fill - 20);
     }
-    assignTargets(points);
+    assignTargetsFlat(points);
   },
 
   spiral() {
     const points = [];
-    const maxRadius = Math.min(width, height) * 0.35;
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const t = i / PARTICLE_COUNT;
-      const angle = t * Math.PI * 10 + time * 0.005;
-      const radius = t * maxRadius;
-      const x = centerX + Math.cos(angle) * radius;
-      const y = centerY + Math.sin(angle) * radius;
-      points.push({ x, y });
+    const maxRadius = Math.min(width, height) * 0.38;
+    const arms = 4;
+    const perArm = Math.floor(PARTICLE_COUNT * 0.85 / arms);
+    const coreCount = PARTICLE_COUNT - perArm * arms;
+
+    for (let a = 0; a < arms; a++) {
+      const armOffset = (a / arms) * Math.PI * 2;
+      for (let i = 0; i < perArm; i++) {
+        const t = i / perArm;
+        const angle = t * Math.PI * 3 + armOffset + time * 0.003;
+        const radius = t * maxRadius;
+        const spread = t * 15 + 2;
+        const jx = (Math.random() - 0.5) * spread;
+        const jy = (Math.random() - 0.5) * spread;
+        points.push(centerX + Math.cos(angle) * radius + jx, centerY + Math.sin(angle) * radius + jy);
+      }
     }
-    assignTargets(points);
+
+    for (let i = 0; i < coreCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const radius = Math.random() * maxRadius * 0.08;
+      points.push(centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius);
+    }
+
+    assignTargetsFlat(points);
   },
 };
 
@@ -294,7 +434,6 @@ function getTextPoints(text, fontSize) {
   const offCtx = offscreen.getContext('2d');
   offscreen.width = width;
   offscreen.height = height;
-
   offCtx.fillStyle = '#fff';
   offCtx.font = `bold ${fontSize}px 'SF Pro Display', Arial, sans-serif`;
   offCtx.textAlign = 'center';
@@ -305,7 +444,6 @@ function getTextPoints(text, fontSize) {
   const pixels = imageData.data;
   const points = [];
   const step = 3;
-
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
       const i = (y * width + x) * 4;
@@ -314,40 +452,38 @@ function getTextPoints(text, fontSize) {
       }
     }
   }
-
   return points;
 }
 
-// --- Assign target points to particles ---
+// --- Assign targets (object array version for text) ---
 function assignTargets(points) {
   if (points.length === 0) return;
-
-  // Shuffle points for natural distribution
   for (let i = points.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [points[i], points[j]] = [points[j], points[i]];
   }
-
   for (let i = 0; i < PARTICLE_COUNT; i++) {
     const target = points[i % points.length];
-    // Add slight jitter
-    particles[i].tx = target.x + (Math.random() - 0.5) * 3;
-    particles[i].ty = target.y + (Math.random() - 0.5) * 3;
-    particles[i].hasTarget = true;
+    tx[i] = target.x + (Math.random() - 0.5) * 3;
+    ty[i] = target.y + (Math.random() - 0.5) * 3;
+    hasTarget[i] = 1;
   }
 }
 
-// --- Init Particles ---
-function init() {
-  particles = [];
+// --- Assign targets (flat array version for perf) ---
+function assignTargetsFlat(points) {
+  const count = points.length / 2;
+  if (count === 0) return;
   for (let i = 0; i < PARTICLE_COUNT; i++) {
-    particles.push(new Particle(i));
+    const idx = (i % count) * 2;
+    tx[i] = points[idx] + (Math.random() - 0.5) * 2;
+    ty[i] = points[idx + 1] + (Math.random() - 0.5) * 2;
+    hasTarget[i] = 1;
   }
 }
 
 // --- Animation Loop ---
 function animate(timestamp) {
-  // FPS counter
   frameCount++;
   if (timestamp - lastTime >= 1000) {
     fps = frameCount;
@@ -358,20 +494,22 @@ function animate(timestamp) {
 
   time++;
 
-  // Clear with trail effect
+  // Clear with trail
   ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
   ctx.fillRect(0, 0, width, height);
 
-  // Update formation continuously for animated modes
+  // Build spatial grid for flocking
+  if (currentMode === 'swarm') {
+    buildGrid();
+  }
+
+  // Update animated formations
   if (currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral') {
     formations[currentMode]();
   }
 
-  // Update & draw particles
-  for (let i = 0; i < PARTICLE_COUNT; i++) {
-    particles[i].update();
-    particles[i].draw();
-  }
+  updateParticles();
+  drawParticles();
 
   requestAnimationFrame(animate);
 }
