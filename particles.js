@@ -269,8 +269,171 @@ const formations = {
     for (let i = 0; i < PARTICLE_COUNT; i++) hasTarget[i] = 0;
   },
 
+  face() {
+    const points = [];
+    const s = Math.min(width, height) * 0.35;
+    const cx = centerX;
+    const cy = centerY - s * 0.05;
+
+    // Mouth animation — opens and closes like talking
+    const mouthOpen = (Math.sin(time * 0.15) * 0.5 + 0.5) * 0.7 + 0.1;
+    // Eyebrow raise synced with speech
+    const browRaise = Math.sin(time * 0.15 + 0.5) * 0.03;
+    // Subtle eye blink
+    const blink = (Math.sin(time * 0.04) > 0.97) ? 0.15 : 1.0;
+
+    // Allocate particles to features
+    const headCount = Math.floor(PARTICLE_COUNT * 0.35);
+    const eyeCount = Math.floor(PARTICLE_COUNT * 0.08);
+    const pupilCount = Math.floor(PARTICLE_COUNT * 0.04);
+    const browCount = Math.floor(PARTICLE_COUNT * 0.04);
+    const noseCount = Math.floor(PARTICLE_COUNT * 0.05);
+    const mouthCount = Math.floor(PARTICLE_COUNT * 0.15);
+    const lipCount = Math.floor(PARTICLE_COUNT * 0.08);
+    const jawCount = PARTICLE_COUNT - headCount - eyeCount * 2 - pupilCount * 2 - browCount * 2 - noseCount - mouthCount - lipCount;
+
+    // --- Head outline (oval) ---
+    for (let i = 0; i < headCount; i++) {
+      const t = (i / headCount) * Math.PI * 2;
+      const rx = s * 0.42;
+      const ry = s * 0.55;
+      // Vary radius slightly for thickness
+      const thick = 1 + Math.random() * 0.06;
+      const x = cx + Math.cos(t) * rx * thick;
+      const y = cy + Math.sin(t) * ry * thick;
+      points.push(x, y);
+    }
+
+    // --- Left eye ---
+    const eyeY = cy - s * 0.12 * blink;
+    const eyeSpacing = s * 0.16;
+    for (let i = 0; i < eyeCount; i++) {
+      const t = (i / eyeCount) * Math.PI * 2;
+      const rx = s * 0.085;
+      const ry = s * 0.05 * blink;
+      const fill = 0.3 + Math.random() * 0.7;
+      const x = cx - eyeSpacing + Math.cos(t) * rx * fill;
+      const y = eyeY + Math.sin(t) * ry * fill;
+      points.push(x, y);
+    }
+
+    // --- Right eye ---
+    for (let i = 0; i < eyeCount; i++) {
+      const t = (i / eyeCount) * Math.PI * 2;
+      const rx = s * 0.085;
+      const ry = s * 0.05 * blink;
+      const fill = 0.3 + Math.random() * 0.7;
+      const x = cx + eyeSpacing + Math.cos(t) * rx * fill;
+      const y = eyeY + Math.sin(t) * ry * fill;
+      points.push(x, y);
+    }
+
+    // --- Left pupil ---
+    for (let i = 0; i < pupilCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * s * 0.03;
+      const x = cx - eyeSpacing + Math.cos(angle) * r;
+      const y = eyeY + Math.sin(angle) * r * blink;
+      points.push(x, y);
+    }
+
+    // --- Right pupil ---
+    for (let i = 0; i < pupilCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * s * 0.03;
+      const x = cx + eyeSpacing + Math.cos(angle) * r;
+      const y = eyeY + Math.sin(angle) * r * blink;
+      points.push(x, y);
+    }
+
+    // --- Left eyebrow ---
+    const browY = cy - s * 0.22 - browRaise * s;
+    for (let i = 0; i < browCount; i++) {
+      const t = i / browCount;
+      const x = cx - eyeSpacing - s * 0.08 + t * s * 0.16;
+      const curve = -Math.sin(t * Math.PI) * s * 0.025;
+      const y = browY + curve + (Math.random() - 0.5) * 3;
+      points.push(x, y);
+    }
+
+    // --- Right eyebrow ---
+    for (let i = 0; i < browCount; i++) {
+      const t = i / browCount;
+      const x = cx + eyeSpacing - s * 0.08 + t * s * 0.16;
+      const curve = -Math.sin(t * Math.PI) * s * 0.025;
+      const y = browY + curve + (Math.random() - 0.5) * 3;
+      points.push(x, y);
+    }
+
+    // --- Nose ---
+    for (let i = 0; i < noseCount; i++) {
+      const t = i / noseCount;
+      // Nose line
+      if (t < 0.6) {
+        const nt = t / 0.6;
+        const x = cx + Math.sin(nt * Math.PI * 0.3) * s * 0.02;
+        const y = cy - s * 0.02 + nt * s * 0.18;
+        points.push(x + (Math.random() - 0.5) * 2, y);
+      } else {
+        // Nostril area
+        const angle = ((t - 0.6) / 0.4) * Math.PI;
+        const x = cx + Math.cos(angle) * s * 0.04;
+        const y = cy + s * 0.16 + Math.sin(angle) * s * 0.015;
+        points.push(x, y);
+      }
+    }
+
+    // --- Mouth (animated opening) ---
+    const mouthY = cy + s * 0.28;
+    const mouthW = s * 0.18;
+    const mouthH = s * 0.04 + mouthOpen * s * 0.12;
+
+    // Upper lip
+    for (let i = 0; i < lipCount / 2; i++) {
+      const t = i / (lipCount / 2);
+      const x = cx - mouthW + t * mouthW * 2;
+      const curve = -Math.sin(t * Math.PI) * s * 0.015;
+      // Cupid's bow
+      const bow = Math.sin(t * Math.PI * 2) * s * 0.008;
+      const y = mouthY - mouthH * 0.5 + curve + bow + (Math.random() - 0.5) * 2;
+      points.push(x, y);
+    }
+
+    // Lower lip
+    for (let i = 0; i < lipCount / 2; i++) {
+      const t = i / (lipCount / 2);
+      const x = cx - mouthW + t * mouthW * 2;
+      const curve = Math.sin(t * Math.PI) * s * 0.02;
+      const y = mouthY + mouthH * 0.5 + curve + (Math.random() - 0.5) * 2;
+      points.push(x, y);
+    }
+
+    // Mouth interior (dark gap when open)
+    for (let i = 0; i < mouthCount; i++) {
+      const t = Math.random();
+      const angle = Math.random() * Math.PI * 2;
+      const rx = mouthW * 0.85;
+      const ry = mouthH * 0.35;
+      const fill = Math.random() * 0.9 + 0.1;
+      const x = cx + Math.cos(angle) * rx * fill * (0.5 + t * 0.5);
+      const y = mouthY + Math.sin(angle) * ry * fill;
+      points.push(x, y);
+    }
+
+    // --- Jaw / chin emphasis ---
+    for (let i = 0; i < jawCount; i++) {
+      const t = (i / jawCount) * Math.PI;
+      const x = cx + Math.cos(t + Math.PI) * s * 0.3;
+      const y = cy + s * 0.45 + Math.sin(t) * s * 0.1;
+      const jit = (Math.random() - 0.5) * 4;
+      points.push(x + jit, y + jit);
+    }
+
+    assignTargetsFlat(points);
+  },
+
   text() {
-    const points = getTextPoints('HELLO', 160);
+    const points = getTextPoints('PARTICLE SWARM', Math.min(width * 0.09, 120));
     assignTargets(points);
   },
 
@@ -504,7 +667,7 @@ function animate(timestamp) {
   }
 
   // Update animated formations
-  if (currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral') {
+  if (currentMode === 'face' || currentMode === 'wave' || currentMode === 'sphere' || currentMode === 'dna' || currentMode === 'spiral') {
     formations[currentMode]();
   }
 
@@ -548,7 +711,7 @@ document.querySelectorAll('.controls button').forEach(btn => {
 
 // --- Keyboard shortcuts ---
 document.addEventListener('keydown', (e) => {
-  const keys = { '1': 'swarm', '2': 'text', '3': 'wave', '4': 'chart', '5': 'sphere', '6': 'dna', '7': 'heart', '8': 'spiral' };
+  const keys = { '1': 'swarm', '2': 'face', '3': 'text', '4': 'wave', '5': 'chart', '6': 'sphere', '7': 'dna', '8': 'heart', '9': 'spiral' };
   if (keys[e.key]) {
     currentMode = keys[e.key];
     formations[currentMode]();
